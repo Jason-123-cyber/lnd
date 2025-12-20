@@ -3399,6 +3399,18 @@ func (s *server) genNodeAnnouncement(features *lnwire.RawFeatureVector,
 		modifier(&newNodeAnn)
 	}
 
+	// The modifiers may have added duplicate addresses, so we need to
+	// de-duplicate them here.
+	uniqueAddrs := map[string]struct{}{}
+	dedupedAddrs := make([]net.Addr, 0)
+	for _, addr := range newNodeAnn.Addresses {
+		if _, ok := uniqueAddrs[addr.String()]; !ok {
+			uniqueAddrs[addr.String()] = struct{}{}
+			dedupedAddrs = append(dedupedAddrs, addr)
+		}
+	}
+	newNodeAnn.Addresses = dedupedAddrs
+
 	// Sign a new update after applying all of the passed modifiers.
 	err := netann.SignNodeAnnouncement(
 		s.nodeSigner, s.identityKeyLoc, &newNodeAnn,
@@ -5544,6 +5556,20 @@ func (s *server) AttemptRBFCloseUpdate(ctx context.Context,
 	return updates, nil
 }
 
+// calculateNodeAnnouncementTimestamp returns the timestamp to use for a node
+// announcement, ensuring it's at least one second after the previously
+// persisted timestamp. This ensures BOLT-07 compliance, which requires node
+// announcements to have strictly increasing timestamps.
+func calculateNodeAnnouncementTimestamp(persistedTime,
+	currentTime time.Time) time.Time {
+
+	if persistedTime.Unix() >= currentTime.Unix() {
+		return persistedTime.Add(time.Second)
+	}
+
+	return currentTime
+}
+
 // setSelfNode configures and sets the server's self node. It sets the node
 // announcement, signs it, and updates the source node in the graph. When
 // determining values such as color and alias, the method prioritizes values
@@ -5611,9 +5637,9 @@ func (s *server) setSelfNode(ctx context.Context, nodePub route.Vertex,
 		// If we have a source node persisted in the DB already, then we
 		// just need to make sure that the new LastUpdate time is at
 		// least one second after the last update time.
-		if srcNode.LastUpdate.Second() >= nodeLastUpdate.Second() {
-			nodeLastUpdate = srcNode.LastUpdate.Add(time.Second)
-		}
+		nodeLastUpdate = calculateNodeAnnouncementTimestamp(
+			srcNode.LastUpdate, nodeLastUpdate,
+		)
 
 		// If the color is not changed from default, it means that we
 		// didn't specify a different color in the config. We'll use the
